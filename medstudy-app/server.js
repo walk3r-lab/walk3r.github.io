@@ -1,5 +1,5 @@
 require('dotenv').config();
-const express=require('express'),cookieParser=require('cookie-parser'),jwt=require('jsonwebtoken'),bcrypt=require('bcryptjs'),path=require('path'),fs=require('fs'),vm=require('vm');
+const express=require('express'),cookieParser=require('cookie-parser'),jwt=require('jsonwebtoken'),bcrypt=require('bcryptjs'),path=require('path');
 const {createClient}=require('@supabase/supabase-js');
 const crypto=require('crypto');
 const app=express();
