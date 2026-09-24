@@ -13,7 +13,7 @@
 <script>
 let me=null,topics=[],resources=[],config={price:600,paymentNumber:'0736501740'},mode='login';
 const $=id=>document.getElementById(id);
-async function api(url,opt={}){let r=await fetch(url,{credentials:'include',headers:{'Content-Type':'application/json'},...opt});let d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||'Request failed');return d}
+async function api(url,opt={}){let r=await fetch(url,{cache:'no-store',credentials:'include',headers:{'Content-Type':'application/json'},...opt});let d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||'Request failed');return d}
 function openModal(m){mode=m;$('modal').classList.remove('hidden');$('modalTitle').textContent=m==='login'?'Sign in':'Create account';$('authSubmit').textContent=m==='login'?'Sign in':'Create account';$('identity').classList.toggle('hidden',m!=='login');$('email').classList.toggle('hidden',m==='login');$('phone').classList.toggle('hidden',m==='login');$('switchAuth').innerHTML=m==='login'?'New here? <button class="ghost" onclick="openModal(\'signup\')">Create account</button>':'Already registered? <button class="ghost" onclick="openModal(\'login\')">Sign in</button>'; $('authMsg').textContent=''}
 function closeModal(){$('modal').classList.add('hidden')}
 $('authForm').onsubmit=async e=>{e.preventDefault();try{let body=mode==='login'?{identity:$('identity').value,password:$('password').value}:{email:$('email').value,phone:$('phone').value,password:$('password').value};let d=await api('/api/auth/'+(mode==='login'?'login':'signup'),{method:'POST',body:JSON.stringify(body)});me=d.user;closeModal();render();}catch(e){$('authMsg').textContent=e.message}};
