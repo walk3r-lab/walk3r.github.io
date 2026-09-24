@@ -2,3 +2,4 @@ MedStudy Space v2.0 learning workspace
 AI notes, quizzes, flashcards, lecture tutor, streaks, progress and timed break games.
 Deployment marker: 2026-09-24
 Content management + secure resource uploads enabled 2026-09-24
+Adaptive learner AI + in-site YouTube search 2026-09-24
