@@ -28,7 +28,7 @@ window.openYouTubeSearch=function(q){
 window.openYouTubeResults=function(q){
   var v=String(q||"").trim();
   if(!v)return;
-  var w=window.open("about:blank","medstudyYouTube","width=1100,height=800,resizable=yes,scrollbars=yes");
+  var w=window.open("about:blank","medstudyYouTube","width=820,height=600,left=680,top=120,resizable=yes,scrollbars=yes");
   if(!w){
     alert("Your browser blocked the YouTube window. Please allow pop-ups for MedStudy Space.");
     return;
