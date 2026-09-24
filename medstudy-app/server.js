@@ -2,6 +2,7 @@ require('dotenv').config();
 const express=require('express'),cookieParser=require('cookie-parser'),jwt=require('jsonwebtoken'),bcrypt=require('bcryptjs'),path=require('path');
 const {createClient}=require('@supabase/supabase-js');
 const crypto=require('crypto');
+const multer=require('multer');
 const app=express();
 app.use(express.json({limit:'60mb'})); app.use(cookieParser()); app.use(express.static('public'));
 const db=createClient(process.env.SUPABASE_URL,process.env.SUPABASE_SERVICE_ROLE_KEY,{auth:{autoRefreshToken:false,persistSession:false}});
