@@ -56,16 +56,18 @@ async function geminiYouTubeTranscript(url){
   if(!GEMINI_KEY)throw Error('AI is not configured. Add GEMINI_API_KEY to the Railway service variables.');
   let id=youtubeId(url);
   if(!id)throw Error('Paste a valid public YouTube video link.');
+  let youtubeUrl='https://www.youtube.com/watch?v='+encodeURIComponent(id);
   let prompt='Transcribe this public YouTube lecture as accurately as possible. Produce a readable lecture transcript from the spoken audio, preserving important medical terminology. Do not summarize or invent content. If some words are unclear, mark them as [unclear]. Include useful timestamps when available. Return only the transcript text.';
-  let models=[AI_MODEL,AI_FALLBACK_MODEL,'gemini-3.8-flash','gemini-3.5-flash-lite'].filter((x,i,a)=>x&&a.indexOf(x)===i);
+  let models=['gemini-3.8-flash','gemini-3.6-flash','gemini-3.5-flash-lite',AI_MODEL,AI_FALLBACK_MODEL].filter((x,i,a)=>x&&a.indexOf(x)===i);
   let last='Gemini could not process this YouTube video.';
   for(const model of models){
     try{
-      let rr=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(GEMINI_KEY),{
-        method:'POST',headers:{'Content-Type':'application/json'},
+      let rr=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','x-goog-api-key':GEMINI_KEY},
         body:JSON.stringify({contents:[{parts:[
-          {file_data:{file_uri:url,mime_type:'video/*'}},
-          {text:prompt}
+          {text:prompt},
+          {file_data:{file_uri:youtubeUrl}}
         ]}]})
       });
       let dd=await rr.json().catch(()=>({}));
@@ -75,9 +77,9 @@ async function geminiYouTubeTranscript(url){
         last='Gemini returned an empty or very short transcript.';
       }else{
         last=dd.error?.message||('Gemini returned HTTP '+rr.status);
-        console.error('Gemini YouTube HTTP '+rr.status+': '+last);
+        console.error('Gemini YouTube HTTP '+rr.status+' using '+model+': '+last);
       }
-    }catch(e){last=e.message;console.error('Gemini YouTube: '+e.message)}
+    }catch(e){last=e.message;console.error('Gemini YouTube '+model+': '+e.message)}
   }
   throw Error(last);
 }
