@@ -3,27 +3,15 @@ document.querySelectorAll('[data-open]').forEach(function(b){b.onclick=function(
 function embed(u){try{var x=new URL(u);if(x.hostname.includes('youtu.be'))return 'https://www.youtube.com/embed/'+x.pathname.slice(1);if(x.hostname.includes('youtube.com')&&x.searchParams.get('v'))return 'https://www.youtube.com/embed/'+x.searchParams.get('v');return u}catch(e){return u}}
 async function openResource(id){try{current=(await api('/api/resources/'+id)).resource;pack=(await api('/api/resources/'+id+'/ai')).pack;var n=(await api('/api/notes/'+id)).note;await api('/api/activity',{method:'POST',body:JSON.stringify({type:'lecture_open',resourceId:id})});workspace(n)}catch(e){alert(e.message)}}
 window.openYouTubeSearch=function(q){
-  var m=document.getElementById("ytSearchModal");
-  if(!m){
-    m=document.createElement("div");
-    m.id="ytSearchModal";
-    m.style.cssText="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:18px";
-    m.innerHTML='<div class="panel" style="width:min(1100px,97vw);height:min(88vh,820px);display:flex;flex-direction:column;gap:10px;position:relative"><div class="head" style="margin:0"><div><h2 style="margin:0">YouTube</h2><p class="muted" style="margin:4px 0">Search YouTube without leaving MedStudy Space.</p></div><button id="ytClose" class="secondary" type="button">✕ Close</button></div><form id="ytSearchForm" class="row" style="margin:0"><input id="ytQ" type="search" autocomplete="off" style="flex:1;min-width:220px;background:#081423;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:12px" placeholder="Search YouTube, e.g. brachial plexus anatomy"><button type="submit">Search</button></form><div style="flex:1;min-height:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff"><iframe id="ytFrame" title="YouTube" style="width:100%;height:100%;border:0" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe></div></div>';
-    document.body.appendChild(m);
-    document.getElementById("ytClose").onclick=function(){m.remove()};
-    document.getElementById("ytSearchForm").onsubmit=function(e){
-      e.preventDefault();
-      var v=document.getElementById("ytQ").value.trim();
-      if(v.length>=1)document.getElementById("ytFrame").src="https://www.youtube.com/results?search_query="+encodeURIComponent(v)
-    };
-    setTimeout(function(){document.getElementById("ytQ").focus()},0)
-  }else{
-    m.style.display="flex";
-    if(q){
-      document.getElementById("ytQ").value=q;
-      document.getElementById("ytFrame").src="https://www.youtube.com/results?search_query="+encodeURIComponent(q)
-    }
+  var v=String(q||"").trim();
+  var w=window.open("about:blank","medstudyYouTube","width=1100,height=800,resizable=yes,scrollbars=yes");
+  if(!w){
+    alert("Your browser blocked the YouTube window. Please allow pop-ups for MedStudy Space and try again.");
+    return;
   }
+  var url="https://www.youtube.com/results?search_query="+encodeURIComponent(v);
+  w.location.href=url;
+  w.focus();
 };
 function workspace(note){var media='';if(current.kind==='video')media='<div class="video"><iframe src="'+embed(current.url)+'" allowfullscreen></iframe></div>';else if(current.kind==='slides')media='<div id="filePreview" class="panel"><p class="muted">Loading uploaded resource…</p></div>';else media='<div class="notice">Reference resource: <a href="'+esc(current.url||'#')+'" target="_blank" rel="noopener">Open source</a></div>';$('app').innerHTML='<div class="head"><div><span class="pill">'+esc(current.subject)+' · '+esc(current.topic)+'</span><h2>'+esc(current.title)+'</h2></div><button class="secondary" data-go="library">← Library</button></div><div class="panel">'+media+'<div class="actions" style="margin-top:10px"><button id="complete">Mark complete</button><button class="secondary" id="generate">'+(pack?'Refresh AI pack':'Generate AI pack')+'</button></div><p id="aiStatus" class="muted">'+(config.aiConfigured?'AI is connected.':'AI provider is not connected yet.')+'</p></div><div class="grid"><div class="panel"><div class="tabs"><button class="tab active" data-tab="notes">AI Notes</button><button class="tab" data-tab="quiz">Quiz</button><button class="tab" data-tab="cards">Flashcards</button><button class="tab" data-tab="tutor">Tutor</button></div><div id="wb">'+(pack?notes(pack):'<div class="notice">Generate a study pack. For YouTube lectures the system uses the available transcript; for uploaded PDFs it extracts the document text. If a YouTube transcript is unavailable, the developer can add an authorized transcript/audio source from Admin.</div>')+'</div></div><div class="panel"><h3>My notes</h3><textarea id="myNotes" placeholder="Your own high-yield notes...">'+esc(note?.body||'')+'</textarea><button id="saveNotes" style="margin-top:8px">Save notes</button></div></div>';if(current.kind==='slides')api('/api/resources/'+current.id+'/file-url').then(function(d){$('filePreview').innerHTML='<iframe src="'+d.url+'" style="width:100%;height:620px;border:0;border-radius:10px"></iframe><p class="muted">This secure preview link expires after one hour.</p>'}).catch(function(e){$('filePreview').innerHTML='<div class="notice">'+esc(e.message)+'</div>'});document.querySelectorAll('[data-tab]').forEach(function(b){b.onclick=function(){tab(b.dataset.tab)}});$('generate').onclick=generate;$('complete').onclick=async function(){await api('/api/activity',{method:'POST',body:JSON.stringify({type:'lecture_complete',resourceId:current.id})});await refresh();alert('Resource marked complete. Your streak has been updated.');route('home')};$('saveNotes').onclick=async function(){await api('/api/notes',{method:'POST',body:JSON.stringify({resourceId:current.id,body:$('myNotes').value})});await api('/api/activity',{method:'POST',body:JSON.stringify({type:'notes_review',resourceId:current.id})});alert('Notes saved.')};bind()}
 function notes(p){var n=p.notes||p;return '<h3>Overview</h3><p>'+esc(n.overview||n.summary||'')+'</p>'+list('Learning objectives',n.objectives)+((n.notes||[]).map(function(x){return '<div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px"><h4>'+esc(x.heading)+'</h4>'+list('',x.points)+'</div>'}).join(''))+list('Key structures',n.key_structures)+list('Clinical correlations',n.clinical_correlations)+list('Must remember',n.must_remember)+'<div class="notice"><b>Summary</b><p>'+esc(n.summary||'')+'</p></div>'}
