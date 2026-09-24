@@ -1,5 +1,5 @@
 require('dotenv').config();
-const express=require('express'),cookieParser=require('cookie-parser'),jwt=require('jsonwebtoken'),bcrypt=require('bcryptjs'),path=require('path');
+const express=require('express'),cookieParser=require('cookie-parser'),jwt=require('jsonwebtoken'),bcrypt=require('bcryptjs'),path=require('path'),fs=require('fs'),vm=require('vm');
 const {createClient}=require('@supabase/supabase-js');
 const crypto=require('crypto');
 const app=express();
@@ -67,4 +67,4 @@ app.post('/api/games/score',access,async(req,res)=>{let game=String(req.body.gam
 app.get('/api/games/scores',access,async(req,res)=>{let r=await db.from('game_scores').select('game,score,duration_seconds,created_at').eq('user_id',req.user.id).order('score',{ascending:false}).limit(20);res.json({scores:r.data||[]})});
 async function ensureAdmin(){let e=String(process.env.ADMIN_EMAIL||'').trim().toLowerCase(),p=String(process.env.ADMIN_PASSWORD||'');if(!e||!p)return;let q=await db.from('app_users').select('id').eq('email',e).maybeSingle();let h=await bcrypt.hash(p,12);if(q.data)await db.from('app_users').update({password_hash:h,role:'developer',subscription_status:'active'}).eq('id',q.data.id);else await db.from('app_users').insert({email:e,password_hash:h,role:'developer',subscription_status:'active'})}
 app.use((q,s)=>s.sendFile(path.join(__dirname,'public','index.html')));
-Promise.all([ensureAdmin(),ensureStorage()]).finally(()=>app.listen(Number(process.env.PORT||3000),()=>console.log('MedStudy running')));
+['upgrade1.js','upgrade2.js','upgrade3.js'].forEach(f=>{try{new vm.Script(fs.readFileSync(path.join(__dirname,'public',f),'utf8'),{filename:f});console.log('Frontend syntax OK:',f)}catch(e){console.error('FRONTEND SYNTAX ERROR:',f,e.message)}});\nPromise.all([ensureAdmin(),ensureStorage()]).finally(()=>app.listen(Number(process.env.PORT||3000),()=>console.log('MedStudy running')));
