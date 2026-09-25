@@ -45,7 +45,15 @@ async function notifyTelegramPending(p,user){
     return {ok:true,id:d.result?.message_id||null}
   }catch(e){console.error('Telegram pending notification:',e.message);return {ok:false,error:e.message}}
 }
-app.post('/api/payments',auth,async(req,res)=>{if(req.user.role==='developer')return res.json({status:'active'});let code=String(req.body.mpesaCode||'').trim().toUpperCase();if(!/^[A-Z0-9]{8,20}$/.test(code))return res.status(400).json({error:'Enter your M-Pesa transaction code'});let x=await db.from('payments').select('id').eq('mpesa_code',code).maybeSingle();if(x.data)return res.status(409).json({error:'Code already submitted'});let r=await db.from('payments').insert({user_id:req.user.id,amount:PRICE,payment_number:PAYNO,mpesa_code:code}).select('id,status').single();if(r.error)return res.status(500).json({error:r.error.message});await db.from('app_users').update({subscription_status:'pending'}).eq('id',req.user.id);let wa=await notifyWhatsAppPending({mpesa_code:code},req.user);let tg=await notifyTelegramPending({mpesa_code:code},req.user);let whatsappLink=WHATSAPP_TO?'https://wa.me/'+WHATSAPP_TO+'?text='+encodeURIComponent('MedStudy Space payment pending%0AStudent: '+(req.user.email||req.user.phone||req.user.id)+'%0APhone: '+(req.user.phone||'')+'%0AAmount: KSh '+PRICE+'%0AM-Pesa code: '+code):null;res.json({payment:r.data,whatsappNotification:wa.ok?'sent':'not_sent',telegramNotification:tg.ok?'sent':'not_sent',whatsappLink})});
+app.post('/api/payments',auth,async(req,res)=>{
+  if(req.user.role==='developer')return res.json({status:'active'});
+  let code=String(req.body.mpesaCode||'').trim().toUpperCase();if(!/^[A-Z0-9]{8,20}$/.test(code))return res.status(400).json({error:'Enter your M-Pesa transaction code'});
+  let x=await db.from('payments').select('id').eq('mpesa_code',code).maybeSingle();if(x.data)return res.status(409).json({error:'Code already submitted'});
+  let r=await db.from('payments').insert({user_id:req.user.id,amount:PRICE,payment_number:PAYNO,mpesa_code:code}).select('id,status').single();if(r.error)return res.status(500).json({error:r.error.message});
+  await db.from('app_users').update({subscription_status:'pending'}).eq('id',req.user.id);
+  let tg=await notifyTelegramPending({mpesa_code:code},req.user);
+  res.json({payment:r.data,telegramNotification:tg.ok?'sent':'not_sent'})
+});
 app.get('/api/admin/payments',admin,async(q,s)=>{let r=await db.from('payments').select('id,user_id,amount,payment_number,mpesa_code,status,created_at,verified_at,verified_by').order('created_at',{ascending:false});if(r.error)return s.status(500).json({error:r.error.message});let ids=[...new Set((r.data||[]).map(x=>x.user_id).filter(Boolean))];let users=ids.length?await db.from('app_users').select('id,email,phone,subscription_status,subscription_started_at,subscription_ends_at').in('id',ids):{data:[],error:null};if(users.error)return s.status(500).json({error:users.error.message});let byId=Object.fromEntries((users.data||[]).map(u=>[u.id,{email:u.email,phone:u.phone}]));s.json({payments:(r.data||[]).map(x=>({...x,app_users:byId[x.user_id]||null}))})});
 app.post('/api/admin/payments/:id/:action',admin,async(req,res)=>{let action=req.params.action;if(!['approve','reject'].includes(action))return res.status(400).json({error:'Invalid action'});let p=await db.from('payments').select('*').eq('id',req.params.id).single();if(p.error)return res.status(404).json({error:'Payment not found'});let verifiedAt=new Date().toISOString();await db.from('payments').update({status:action==='approve'?'approved':'rejected',verified_at:verifiedAt,verified_by:req.user.id}).eq('id',p.data.id);if(action==='approve'){let d=new Date(verifiedAt);d.setMonth(d.getMonth()+6);await db.from('app_users').update({subscription_status:'active',subscription_started_at:verifiedAt,subscription_ends_at:d.toISOString(),updated_at:verifiedAt}).eq('id',p.data.user_id)}else{await db.from('app_users').update({subscription_status:'locked',updated_at:verifiedAt}).eq('id',p.data.user_id)}res.json({ok:true})});
 app.post('/api/admin/subjects',admin,async(req,res)=>{let name=String(req.body.name||'').trim(),description=String(req.body.description||'').trim();if(!name)return res.status(400).json({error:'Subject name required'});let r=await db.from('subjects').insert({name,description}).select('*').single();res.status(r.error?400:200).json(r.error?{error:r.error.message}:{subject:r.data})});
@@ -143,74 +151,94 @@ async function geminiYouTubeTranscript(url){
   }
   throw Error(last);
 }
-async function ai(prompt){if(!GEMINI_KEY)throw Error('Student AI tutor is not configured yet. Add GEMINI_API_KEY to the Railway service variables.');let models=[AI_MODEL,AI_FALLBACK_MODEL,'gemini-3.5-flash'].filter((x,i,a)=>x&&a.indexOf(x)===i),last='Gemini AI request failed';for(const model of models){for(let attempt=0;attempt<2;attempt++){try{let rr=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(GEMINI_KEY),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{role:'user',parts:[{text:String(prompt)}]}]})});let dd=await rr.json().catch(()=>({}));if(rr.ok){let tt=extractText(dd.candidates?.[0]?.content||dd);if(tt)return tt.trim();last='Gemini returned an empty response';break}last=dd.error?.message||('Gemini '+model+' returned HTTP '+rr.status);console.error('Gemini model '+model+' HTTP '+rr.status+': '+last);if(![429,500,502,503,504].includes(rr.status))break}catch(err){last=err.message;console.error('Gemini model '+model+': '+err.message)}if(attempt===0)await new Promise(resolve=>setTimeout(resolve,1000))}}throw Error('Student AI is temporarily busy. Please try again in a few seconds. '+last)}
-function cleanJson(t){let x=t.trim().replace(/^\`\`\`(?:json)?/i,'').replace(/\`\`\`$/,'').trim();let a=x.indexOf('{'),b=x.lastIndexOf('}');if(a>=0&&b>a)return x.slice(a,b+1);a=x.indexOf('[');b=x.lastIndexOf(']');if(a>=0&&b>a)return x.slice(a,b+1);return x;}
+async function fetchJsonWithTimeout(url,options={},timeoutMs=90000){
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{return await fetch(url,{...options,signal:controller.signal})}
+  catch(e){if(e.name==='AbortError')throw Error('The AI request timed out. Please try again.');throw e}
+  finally{clearTimeout(timer)}
+}
+async function ai(prompt){
+  if(!GEMINI_KEY)throw Error('Student AI tutor is not configured yet. Add GEMINI_API_KEY to the Railway service variables.');
+  let models=[AI_MODEL,AI_FALLBACK_MODEL,'gemini-3.5-flash'].filter((x,i,a)=>x&&a.indexOf(x)===i),last='Gemini AI request failed';
+  for(const model of models){
+    try{
+      let rr=await fetchJsonWithTimeout('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(GEMINI_KEY),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{role:'user',parts:[{text:String(prompt)}]}]})});
+      let dd=await rr.json().catch(()=>({}));
+      if(rr.ok){let tt=extractText(dd.candidates?.[0]?.content||dd);if(tt)return tt.trim();last='Gemini returned an empty response'}
+      else{last=dd.error?.message||('Gemini '+model+' returned HTTP '+rr.status);console.error('Gemini model '+model+' HTTP '+rr.status+': '+last);if(![429,500,502,503,504].includes(rr.status))break}
+    }catch(err){last=err.message;console.error('Gemini model '+model+': '+err.message)}
+  }
+  throw Error('Student AI is temporarily busy. Please try again in a few seconds. '+last)
+}
+const studyPackSchema={type:'object',additionalProperties:false,properties:{overview:{type:'string'},objectives:{type:'array',items:{type:'string'}},notes:{type:'array',items:{type:'object',additionalProperties:false,properties:{heading:{type:'string'},points:{type:'array',items:{type:'string'}}},required:['heading','points']}},key_structures:{type:'array',items:{type:'string'}},clinical_correlations:{type:'array',items:{type:'string'}},must_remember:{type:'array',items:{type:'string'}},summary:{type:'string'},questions:{type:'array',minItems:10,maxItems:10,items:{type:'object',additionalProperties:false,properties:{type:{type:'string'},question:{type:'string'},options:{type:'array',minItems:4,maxItems:4,items:{type:'string'}},answer:{type:'integer',minimum:0,maximum:3},explanation:{type:'string'}},required:['type','question','options','answer','explanation']}},flashcards:{type:'array',minItems:12,maxItems:12,items:{type:'object',additionalProperties:false,properties:{front:{type:'string'},back:{type:'string'}},required:['front','back']}}},required:['overview','objectives','notes','key_structures','clinical_correlations','must_remember','summary','questions','flashcards']};
+async function aiJson(prompt){
+  if(!GEMINI_KEY)throw Error('Student AI tutor is not configured yet. Add GEMINI_API_KEY to the Railway service variables.');
+  let models=[AI_MODEL,AI_FALLBACK_MODEL,'gemini-3.5-flash'].filter((x,i,a)=>x&&a.indexOf(x)===i),last='Gemini JSON generation failed';
+  for(const model of models){
+    try{
+      let rr=await fetchJsonWithTimeout('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(GEMINI_KEY),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{role:'user',parts:[{text:String(prompt)}]}],generationConfig:{responseMimeType:'application/json',responseSchema:studyPackSchema,temperature:0.2}})});
+      let dd=await rr.json().catch(()=>({}));
+      if(rr.ok){let raw=String(extractText(dd.candidates?.[0]?.content||dd)||'').trim();if(raw)return raw;last='Gemini returned an empty JSON response'}
+      else{last=dd.error?.message||('Gemini '+model+' returned HTTP '+rr.status);console.error('Gemini JSON '+model+' HTTP '+rr.status+': '+last);if(![429,500,502,503,504].includes(rr.status))break}
+    }catch(err){last=err.message;console.error('Gemini JSON '+model+': '+err.message)}
+  }
+  throw Error('Study-pack AI is temporarily busy. Please try again later. '+last)
+}
+function cleanJson(t){
+  let x=String(t||'').replace(/^\uFEFF/,'').trim().replace(/^```(?:json)?/i,'').replace(/```$/,'').trim();
+  let start=-1,depth=0,inString=false,escaped=false;
+  for(let i=0;i<x.length;i++){let ch=x[i];if(inString){if(escaped)escaped=false;else if(ch==='\\')escaped=true;else if(ch==='"')inString=false;continue}if(ch==='"'){inString=true;continue}if(ch==='{'||ch==='['){if(start<0)start=i;depth++}else if(ch==='}'||ch===']'){if(start>=0){depth--;if(depth===0)return x.slice(start,i+1)}}}
+  return x
+}
+function parseStudyPack(raw){
+  let text=cleanJson(raw),attempts=[text,text.replace(/,\s*([}\]])/g,'$1'),text.replace(/([,{]\s*)([A-Za-z_$][\w$-]*)\s*:/g,'$1"$2":').replace(/,\s*([}\]])/g,'$1')];
+  for(const candidate of attempts){try{return JSON.parse(candidate)}catch(e){}}
+  throw Error('The AI returned an invalid study-pack format. Please try generating the notebook again.')
+}
+function normalizeStudyPack(pack){
+  if(!pack||typeof pack!=='object')throw Error('The AI returned an empty study pack.');
+  let qs=Array.isArray(pack.questions)?pack.questions:[],fs=Array.isArray(pack.flashcards)?pack.flashcards:[];
+  if(qs.length!==10||fs.length!==12)throw Error('The AI returned an incomplete study pack. Please try generating the notebook again.');
+  pack.questions=qs.map((q,i)=>({type:'mcq',question:String(q.question||('Question '+(i+1))),options:Array.isArray(q.options)?q.options.slice(0,4).map(String):[],answer:Number.isInteger(q.answer)?q.answer:0,explanation:String(q.explanation||'')}));
+  pack.flashcards=fs.map(f=>({front:String(f.front||''),back:String(f.back||'')}));
+  if(pack.questions.some(q=>q.options.length!==4||q.answer<0||q.answer>3))throw Error('The AI returned an invalid MCQ set. Please try generating the notebook again.');
+  return pack
+}
 async function getTranscriptFor(resource,allowManual=true){let c=await db.from('lecture_transcripts').select('*').eq('resource_id',resource.id).maybeSingle();if(c.data)return c.data;if(!allowManual)throw Error('No transcript available for this lecture.');if(resource.kind==='slides'){let f=await db.from('resource_files').select('*').eq('resource_id',resource.id).maybeSingle();if(f.data&&f.data.mime_type==='application/pdf'){let file=await db.storage.from('medstudy-resources').download(f.data.storage_path);if(!file.error){try{const pdfParse=(await import('pdf-parse')).default;let parsed=await pdfParse(file.data);if(parsed.text?.trim()){let r=await db.from('lecture_transcripts').insert({resource_id:resource.id,source:'uploaded-pdf',language:'en',transcript:parsed.text}).select('*').single();if(r.error)throw Error(r.error.message);return r.data}}catch(e){throw Error('The PDF was uploaded, but its text could not be extracted: '+e.message)}}}}let tr;try{tr=await fetchTranscript(resource.url)}catch(primary){tr=await geminiYouTubeTranscript(resource.url)}let r=await db.from('lecture_transcripts').insert({resource_id:resource.id,source:tr.model?'gemini-youtube-video':'youtube',language:tr.language||'en',transcript:tr.text}).select('*').single();if(r.error)throw Error(r.error.message);return r.data}
 function studyMetaFromTitle(title){let t=String(title||'').replace(/\s+/g,' ').trim().replace(/^\s*(ANATOMY|ANATOMICAL|LECTURE|VIDEO)\s*[:\-–]\s*/i,'').replace(/\s+[-–]\s+BY\s+DR\.?\s+MITESH\s+DAVE.*$/i,'').replace(/\s+BY\s+DR\.?\s+MITESH\s+DAVE.*$/i,'').trim();let l=t.toLowerCase(),subject='Medical Studies';if(/embry|fertil|blast|cleavage|implant/.test(l))subject='Embryology';else if(/histolog|cell|tissue/.test(l))subject='Histology';else if(/physiolog/.test(l))subject='Physiology';else if(/biochem/.test(l))subject='Biochemistry';else if(/anatom|osteolog|dissection|viva|larynx|stomach|liver|intestin|spleen|kidney|heart|brain|lung|nerve|muscle|plexus/.test(l))subject='Anatomy';return {subject,topic:(t||'Imported lecture').slice(0,140)}}
-async function generatePack(resource,transcript){let source=String(transcript||'').trim();if(!source)throw Error('The lecture transcript is empty.');let prompt=`Create a complete medical study pack for the lecture titled "${resource.title}". Use ONLY information supported by the transcript below; do not invent facts. Preserve important medical terminology. Return VALID JSON only with this shape: {"overview":"","objectives":[""],"notes":[{"heading":"","points":[""]}],"key_structures":[""],"clinical_correlations":[""],"must_remember":[""],"summary":"","questions":[{"type":"mcq","question":"","options":["","","",""],"answer":0,"explanation":""}],"flashcards":[{"front":"","back":""}]}. Make exactly 10 useful MCQs and exactly 12 flashcards. Make the notes comprehensive but concise. Prioritize high-yield anatomy, relationships, actions, innervation, blood supply, clinical correlations and exam-relevant facts only when the transcript actually covers them.
-
-LECTURE TRANSCRIPT:
-${source.slice(0,220000)}`;let raw=await ai(prompt),pack=JSON.parse(cleanJson(raw));return pack}
+async function generatePack(resource,transcript){
+  let source=String(transcript||'').trim();
+  if(!source)throw Error('The lecture transcript is empty.');
+  let prompt=['Create a complete medical study pack for the lecture titled "'+resource.title+'". Use ONLY information supported by the transcript below; do not invent facts. Preserve important medical terminology. Return JSON matching the requested schema. Make exactly 10 useful MCQs and exactly 12 flashcards. Each MCQ must have exactly 4 options and answer must be the zero-based correct option index. Make the notes comprehensive but concise. Prioritize high-yield anatomy, relationships, actions, innervation, blood supply, clinical correlations and exam-relevant facts only when the transcript actually covers them.','','LECTURE TRANSCRIPT:',source.slice(0,220000)].join('\n');
+  return normalizeStudyPack(parseStudyPack(await aiJson(prompt)));
+}
 const youtubeJobs=new Map();
 
 async function processYoutubeNotebook(jobId,url,userId){
-  const job=youtubeJobs.get(jobId);
-  if(!job)return;
+  const job=youtubeJobs.get(jobId);if(!job)return;
   try{
-    job.status='working'; job.message='Getting the lecture transcript…';
-    let id=youtubeId(url),title='YouTube Lecture · '+id,meta;
-    try{
-      let o=await fetch('https://www.youtube.com/oembed?url='+encodeURIComponent(url)+'&format=json');
-      if(o.ok){let d=await o.json();if(d.title)title=String(d.title).slice(0,180)}
-    }catch{}
+    job.status='working';job.message='Getting the lecture transcript…';
+    let id=youtubeId(url),title='YouTube Lecture · '+id,meta=studyMetaFromTitle(title);
+    try{let o=await fetchJsonWithTimeout('https://www.youtube.com/oembed?url='+encodeURIComponent(url)+'&format=json',{method:'GET'},20000);if(o.ok){let d=await o.json();if(d.title){title=String(d.title).slice(0,180);meta=studyMetaFromTitle(title)}}}catch{}
     let tr;
     try{tr=await fetchTranscript(url);job.message='Transcript found. Building your study pack…'}
     catch(primary){job.message='YouTube captions are unavailable. AI is transcribing the lecture now…';tr=await geminiYouTubeTranscript(url)}
-    let existing=await db.from('resources').select('*').eq('url',url).eq('created_by',userId).maybeSingle();
-    if(existing.error)throw Error(existing.error.message);
+    let existing=await db.from('resources').select('*').eq('url',url).eq('created_by',userId).maybeSingle();if(existing.error)throw Error(existing.error.message);
     let resource;
-    if(existing.data){resource=existing.data;let meta2=studyMetaFromTitle(resource.title);let upd=await db.from('resources').update({subject:meta2.subject,topic:meta2.topic}).eq('id',resource.id).select('*').single();if(!upd.error)resource=upd.data;}
-    else{
-      let ins=await db.from('resources').insert({
-        kind:'video',title,subject:meta?.subject||'Medical Studies',topic:meta?.topic||title,
-        description:'AI study notebook created from a public YouTube video.',url,created_by:userId
-      }).select('*').single();
-      if(ins.error)throw Error(ins.error.message);
-      resource=ins.data;
-    }
+    if(existing.data){resource=existing.data;let meta2=studyMetaFromTitle(resource.title||title);let upd=await db.from('resources').update({subject:meta2.subject,topic:meta2.topic}).eq('id',resource.id).select('*').single();if(!upd.error)resource=upd.data}
+    else{let ins=await db.from('resources').insert({kind:'video',title,subject:meta.subject,topic:meta.topic,description:'AI study notebook created from a public YouTube video.',url,created_by:userId}).select('*').single();if(ins.error)throw Error(ins.error.message);resource=ins.data}
     if(!resource||!resource.id||!resource.kind)throw Error('The YouTube resource could not be created. Please try again.');
-    let saved=await db.from('lecture_transcripts').upsert({
-      resource_id:resource.id,source:tr.model?'gemini-youtube-video':'youtube',
-      language:tr.language||'en',transcript:tr.text,updated_at:new Date().toISOString()
-    },{onConflict:'resource_id'}).select('*').single();
-    if(saved.error)throw Error(saved.error.message);
-    job.transcript=saved.data; job.resource=resource;
-    job.message='Transcript ready. Generating notes, MCQs and flashcards…';
-    let pack=await generatePack(resource,tr.text);
-    let old=await db.from('ai_study_packs').select('id').eq('resource_id',resource.id).maybeSingle();
-    if(old.error)throw Error(old.error.message);
-    let pr=old.data
-      ? await db.from('ai_study_packs').update({
-          notes:pack,questions:pack.questions||[],flashcards:pack.flashcards||[],
-          model:AI_MODEL,updated_at:new Date().toISOString()
-        }).eq('resource_id',resource.id).select('*').single()
-      : await db.from('ai_study_packs').insert({
-          resource_id:resource.id,notes:pack,questions:pack.questions||[],
-          flashcards:pack.flashcards||[],model:AI_MODEL
-        }).select('*').single();
-    if(pr.error)throw Error(pr.error.message);
-    await db.from('study_activity').insert({
-      user_id:userId,resource_id:resource.id,activity_type:'lecture_open',
-      metadata:{source:'youtube-notebook',transcription_model:tr.model||'youtube'}
-    });
-    job.status='complete';job.message='Notebook ready.';job.pack=pr.data;
-  }catch(e){
-    console.error('YouTube notebook:',e.message);
-    job.status='error';job.message=e.message||'YouTube notebook generation failed.';
-  }
-  setTimeout(()=>youtubeJobs.delete(jobId),30*60*1000);
+    let saved=await db.from('lecture_transcripts').upsert({resource_id:resource.id,source:tr.model?'gemini-youtube-video':'youtube',language:tr.language||'en',transcript:tr.text,updated_at:new Date().toISOString()},{onConflict:'resource_id'}).select('*').single();if(saved.error)throw Error(saved.error.message);
+    job.transcript=saved.data;job.resource=resource;
+    let existingPack=await db.from('ai_study_packs').select('*').eq('resource_id',resource.id).maybeSingle();if(existingPack.error)throw Error(existingPack.error.message);
+    let pr;
+    if(existingPack.data){pr={data:existingPack.data,error:null};job.message='Existing study pack found. Opening your saved notebook…'}
+    else{job.message='Transcript ready. Generating notes, MCQs and flashcards…';let pack=await generatePack(resource,tr.text);pr=await db.from('ai_study_packs').insert({resource_id:resource.id,notes:pack,questions:pack.questions||[],flashcards:pack.flashcards||[],model:AI_MODEL}).select('*').single();if(pr.error)throw Error(pr.error.message)}
+    await db.from('study_activity').insert({user_id:userId,resource_id:resource.id,activity_type:'lecture_open',metadata:{source:'youtube-notebook',transcription_model:tr.model||'youtube'}});
+    job.status='complete';job.message='Notebook ready.';job.pack=pr.data
+  }catch(e){console.error('YouTube notebook:',e.message);job.status='error';job.message=e.message||'YouTube notebook generation failed.'}
+  setTimeout(()=>youtubeJobs.delete(jobId),30*60*1000)
 }
-
 app.post('/api/youtube/notebook',access,async(req,res)=>{
   let url=String(req.body.url||'').trim();
   if(!youtubeId(url))return res.status(400).json({error:'Paste a valid public YouTube video link.'});
@@ -226,7 +254,10 @@ app.get('/api/youtube/notebook/:jobId',access,async(req,res)=>{
   res.json({status:job.status,message:job.message,resource:job.resource||null,transcript:job.transcript||null,pack:job.pack||null});
 });
 
-app.post('/api/resources/:id/ai/generate',access,async(req,res)=>{let rr=await db.from('resources').select('*').eq('id',req.params.id).single();if(rr.error)return res.status(404).json({error:'Lecture not found'});try{let tr=await getTranscriptFor(rr.data),pack=await generatePack(rr.data,tr.transcript);let old=await db.from('ai_study_packs').select('id').eq('resource_id',rr.data.id).maybeSingle();let r=old.data?await db.from('ai_study_packs').update({notes:pack,questions:pack.questions||[],flashcards:pack.flashcards||[],model:AI_MODEL,updated_at:new Date().toISOString()}).eq('resource_id',rr.data.id).select('*').single():await db.from('ai_study_packs').insert({resource_id:rr.data.id,notes:pack,questions:pack.questions||[],flashcards:pack.flashcards||[],model:AI_MODEL}).select('*').single();if(r.error)throw Error(r.error.message);res.json({pack:r.data})}catch(e){res.status(400).json({error:e.message})}});
+app.post('/api/resources/:id/ai/generate',access,async(req,res)=>{
+  let rr=await db.from('resources').select('*').eq('id',req.params.id).single();if(rr.error)return res.status(404).json({error:'Lecture not found'});
+  try{let existing=await db.from('ai_study_packs').select('*').eq('resource_id',rr.data.id).maybeSingle();if(existing.error)throw Error(existing.error.message);if(existing.data)return res.json({pack:existing.data});let tr=await getTranscriptFor(rr.data),pack=await generatePack(rr.data,tr.transcript);let r=await db.from('ai_study_packs').insert({resource_id:rr.data.id,notes:pack,questions:pack.questions||[],flashcards:pack.flashcards||[],model:AI_MODEL}).select('*').single();if(r.error)throw Error(r.error.message);res.json({pack:r.data})}catch(e){res.status(400).json({error:e.message})}
+});
 app.get('/api/resources/:id/ai',access,async(req,res)=>{let r=await db.from('ai_study_packs').select('*').eq('resource_id',req.params.id).maybeSingle();res.json({pack:r.data||null})});
 app.post('/api/resources/:id/transcribe-audio',admin,async(req,res)=>{if(!OPENAI_KEY)return res.status(503).json({error:'Voice transcription is not configured. Add OPENAI_API_KEY to the Railway service before using voice transcription.'});let mime=String(req.body.mimeType||''),base=String(req.body.fileBase64||'').replace(/^data:[^,]+,/,'');if(!base)return res.status(400).json({error:'Audio file is required'});let allowed=['audio/mpeg','audio/mp4','audio/wav','audio/x-m4a','audio/webm'];if(!allowed.includes(mime))return res.status(400).json({error:'Use MP3, M4A/MP4, WAV or WebM audio'});let buf=Buffer.from(base,'base64');if(buf.length>25*1024*1024)return res.status(413).json({error:'Audio is too large for this transcription upload. Use a shorter file or split the lecture into parts.'});let fd=new FormData();fd.append('model','gpt-4o-transcribe');fd.append('file',new Blob([buf],{type:mime}),safeName(req.body.fileName||'lecture-audio'));let rr=await fetch('https://api.openai.com/v1/audio/transcriptions',{method:'POST',headers:{Authorization:'Bearer '+OPENAI_KEY},body:fd});let data=await rr.json().catch(()=>({}));if(!rr.ok)return res.status(400).json({error:data.error?.message||'Voice transcription failed'});let text=String(data.text||'').trim();if(text.length<50)return res.status(400).json({error:'The transcription was empty or too short'});let r=await db.from('lecture_transcripts').upsert({resource_id:req.params.id,source:'authorized-audio-asr',language:'en',transcript:text,updated_at:new Date().toISOString()},{onConflict:'resource_id'}).select('*').single();if(r.error)return res.status(400).json({error:r.error.message});res.json({transcript:r.data})});
 app.post('/api/resources/:id/transcript',admin,async(req,res)=>{let text=String(req.body.transcript||'').trim();if(text.length<50)return res.status(400).json({error:'Transcript is too short'});let r=await db.from('lecture_transcripts').upsert({resource_id:req.params.id,source:'manual',language:String(req.body.language||'en'),transcript:text,updated_at:new Date().toISOString()},{onConflict:'resource_id'}).select('*').single();res.status(r.error?400:200).json(r.error?{error:r.error.message}:{transcript:r.data})});
