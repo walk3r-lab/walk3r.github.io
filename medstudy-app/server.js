@@ -243,6 +243,50 @@ function normalizeStudyPack(pack){
 }
 async function getTranscriptFor(resource,allowManual=true){let c=await db.from('lecture_transcripts').select('*').eq('resource_id',resource.id).maybeSingle();if(c.data)return c.data;if(!allowManual)throw Error('No transcript available for this lecture.');if(resource.kind==='slides'){let f=await db.from('resource_files').select('*').eq('resource_id',resource.id).maybeSingle();if(f.data&&f.data.mime_type==='application/pdf'){let file=await db.storage.from('medstudy-resources').download(f.data.storage_path);if(!file.error){try{const pdfParse=(await import('pdf-parse')).default;let parsed=await pdfParse(file.data);if(parsed.text?.trim()){let r=await db.from('lecture_transcripts').insert({resource_id:resource.id,source:'uploaded-pdf',language:'en',transcript:parsed.text}).select('*').single();if(r.error)throw Error(r.error.message);return r.data}}catch(e){throw Error('The PDF was uploaded, but its text could not be extracted: '+e.message)}}}}let tr;try{tr=await fetchTranscript(resource.url)}catch(primary){tr=await geminiYouTubeTranscript(resource.url,userId)}let r=await db.from('lecture_transcripts').insert({resource_id:resource.id,source:tr.model?'gemini-youtube-video':'youtube',language:tr.language||'en',transcript:tr.text}).select('*').single();if(r.error)throw Error(r.error.message);return r.data}
 function studyMetaFromTitle(title){let t=String(title||'').replace(/\s+/g,' ').trim().replace(/^\s*(ANATOMY|ANATOMICAL|LECTURE|VIDEO)\s*[:\-–]\s*/i,'').replace(/\s+[-–]\s+BY\s+DR\.?\s+MITESH\s+DAVE.*$/i,'').replace(/\s+BY\s+DR\.?\s+MITESH\s+DAVE.*$/i,'').trim();let l=t.toLowerCase(),subject='Medical Studies';if(/embry|fertil|blast|cleavage|implant/.test(l))subject='Embryology';else if(/histolog|cell|tissue/.test(l))subject='Histology';else if(/physiolog/.test(l))subject='Physiology';else if(/biochem/.test(l))subject='Biochemistry';else if(/anatom|osteolog|dissection|viva|larynx|stomach|liver|intestin|spleen|kidney|heart|brain|lung|nerve|muscle|plexus/.test(l))subject='Anatomy';return {subject,topic:(t||'Imported lecture').slice(0,140)}}
+async function getSavedStudyPack(resourceId){
+  let r=await db.from('ai_study_packs').select('*').eq('resource_id',resourceId).maybeSingle();
+  if(r.error)throw Error(r.error.message);
+  return r.data||null;
+}
+async function generateOrReuseStudyPack(resource,userId){
+  let saved=await getSavedStudyPack(resource.id);
+  if(saved)return saved;
+  const ownerJobId=crypto.randomUUID();
+  let lock=await db.from('ai_generation_locks').insert({resource_id:resource.id,owner_job_id:ownerJobId,status:'working'}).select('*').single();
+  if(lock.error){
+    const started=Date.now();
+    while(Date.now()-started<150000){
+      saved=await getSavedStudyPack(resource.id);
+      if(saved)return saved;
+      let current=await db.from('ai_generation_locks').select('*').eq('resource_id',resource.id).maybeSingle();
+      if(!current.data){
+        lock=await db.from('ai_generation_locks').insert({resource_id:resource.id,owner_job_id:ownerJobId,status:'working'}).select('*').single();
+        if(!lock.error)break;
+      }else if(Date.now()-new Date(current.data.updated_at||current.data.created_at).getTime()>5*60*1000){
+        await db.from('ai_generation_locks').delete().eq('resource_id',resource.id).eq('owner_job_id',current.data.owner_job_id);
+      }
+      await new Promise(r=>setTimeout(r,2000));
+    }
+    saved=await getSavedStudyPack(resource.id);
+    if(saved)return saved;
+    throw Error('This study pack is already being generated. Please wait a moment and open the notebook again.');
+  }
+  try{
+    saved=await getSavedStudyPack(resource.id);
+    if(saved)return saved;
+    let tr=await getTranscriptFor(resource);
+    let pack=await generatePack(resource,tr.transcript,userId);
+    let r=await db.from('ai_study_packs').insert({resource_id:resource.id,notes:pack,questions:pack.questions||[],flashcards:pack.flashcards||[],model:AI_MODEL}).select('*').single();
+    if(r.error){
+      let existing=await getSavedStudyPack(resource.id);
+      if(existing)return existing;
+      throw Error(r.error.message);
+    }
+    return r.data;
+  }finally{
+    await db.from('ai_generation_locks').delete().eq('resource_id',resource.id).eq('owner_job_id',ownerJobId);
+  }
+}
 async function generatePack(resource,transcript,userId=null){
   let source=String(transcript||'').trim();
   if(!source)throw Error('The lecture transcript is empty.');
@@ -270,7 +314,7 @@ async function processYoutubeNotebook(jobId,url,userId){
     let existingPack=await db.from('ai_study_packs').select('*').eq('resource_id',resource.id).maybeSingle();if(existingPack.error)throw Error(existingPack.error.message);
     let pr;
     if(existingPack.data){pr={data:existingPack.data,error:null};job.message='Existing study pack found. Opening your saved notebook…'}
-    else{job.message='Transcript ready. Generating notes, MCQs and flashcards…';let pack=await generatePack(resource,tr.text,userId);pr=await db.from('ai_study_packs').insert({resource_id:resource.id,notes:pack,questions:pack.questions||[],flashcards:pack.flashcards||[],model:AI_MODEL}).select('*').single();if(pr.error)throw Error(pr.error.message)}
+    else{job.message='Transcript ready. Generating notes, MCQs and flashcards…';let savedPack=await generateOrReuseStudyPack(resource,userId);pr={data:savedPack,error:null}}
     await db.from('study_activity').insert({user_id:userId,resource_id:resource.id,activity_type:'lecture_open',metadata:{source:'youtube-notebook',transcription_model:tr.model||'youtube'}});
     job.status='complete';job.message='Notebook ready.';job.pack=pr.data
   }catch(e){console.error('YouTube notebook:',e.message);job.status='error';job.message=e.message||'YouTube notebook generation failed.'}
@@ -293,7 +337,7 @@ app.get('/api/youtube/notebook/:jobId',access,async(req,res)=>{
 
 app.post('/api/resources/:id/ai/generate',access,async(req,res)=>{
   let rr=await db.from('resources').select('*').eq('id',req.params.id).single();if(rr.error)return res.status(404).json({error:'Lecture not found'});
-  try{let existing=await db.from('ai_study_packs').select('*').eq('resource_id',rr.data.id).maybeSingle();if(existing.error)throw Error(existing.error.message);if(existing.data)return res.json({pack:existing.data});let tr=await getTranscriptFor(rr.data),pack=await generatePack(rr.data,tr.transcript,req.user.id);let r=await db.from('ai_study_packs').insert({resource_id:rr.data.id,notes:pack,questions:pack.questions||[],flashcards:pack.flashcards||[],model:AI_MODEL}).select('*').single();if(r.error)throw Error(r.error.message);res.json({pack:r.data})}catch(e){res.status(400).json({error:e.message})}
+  try{let pack=await generateOrReuseStudyPack(rr.data,req.user.id);res.json({pack})}catch(e){res.status(400).json({error:e.message})}
 });
 app.get('/api/resources/:id/ai',access,async(req,res)=>{let r=await db.from('ai_study_packs').select('*').eq('resource_id',req.params.id).maybeSingle();res.json({pack:r.data||null})});
 app.post('/api/resources/:id/transcribe-audio',admin,async(req,res)=>{if(!OPENAI_KEY)return res.status(503).json({error:'Voice transcription is not configured. Add OPENAI_API_KEY to the Railway service before using voice transcription.'});let mime=String(req.body.mimeType||''),base=String(req.body.fileBase64||'').replace(/^data:[^,]+,/,'');if(!base)return res.status(400).json({error:'Audio file is required'});let allowed=['audio/mpeg','audio/mp4','audio/wav','audio/x-m4a','audio/webm'];if(!allowed.includes(mime))return res.status(400).json({error:'Use MP3, M4A/MP4, WAV or WebM audio'});let buf=Buffer.from(base,'base64');if(buf.length>25*1024*1024)return res.status(413).json({error:'Audio is too large for this transcription upload. Use a shorter file or split the lecture into parts.'});let fd=new FormData();fd.append('model','gpt-4o-transcribe');fd.append('file',new Blob([buf],{type:mime}),safeName(req.body.fileName||'lecture-audio'));let rr=await fetch('https://api.openai.com/v1/audio/transcriptions',{method:'POST',headers:{Authorization:'Bearer '+OPENAI_KEY},body:fd});let data=await rr.json().catch(()=>({}));if(!rr.ok)return res.status(400).json({error:data.error?.message||'Voice transcription failed'});let text=String(data.text||'').trim();if(text.length<50)return res.status(400).json({error:'The transcription was empty or too short'});let r=await db.from('lecture_transcripts').upsert({resource_id:req.params.id,source:'authorized-audio-asr',language:'en',transcript:text,updated_at:new Date().toISOString()},{onConflict:'resource_id'}).select('*').single();if(r.error)return res.status(400).json({error:r.error.message});res.json({transcript:r.data})});
