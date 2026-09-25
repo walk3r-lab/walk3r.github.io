@@ -148,76 +148,79 @@ async function getTranscriptFor(resource,allowManual=true){let c=await db.from('
 function splitText(text,size=42000){let words=text.split(/\s+/),chunks=[],cur='';for(const w of words){if((cur+' '+w).trim().length>size){chunks.push(cur.trim());cur=w}else cur=(cur+' '+w).trim()}if(cur)chunks.push(cur);return chunks.slice(0,5)}
 async function generatePack(resource,transcript){let chunks=splitText(transcript,42000),summaries=[];for(let i=0;i<chunks.length;i++){summaries.push(await ai(`You are an anatomy education assistant. Summarize ONLY the source transcript below. Do not invent facts not supported by it. Preserve anatomical terminology. Produce concise study notes with headings, structures, relations, actions, innervation, blood supply, clinical points, and must-remember facts where the transcript actually covers them.\n\nSOURCE CHUNK ${i+1}/${chunks.length}:\n${chunks[i]}`))}
 let combined=summaries.join('\n\n--- CHUNK SUMMARY ---\n');let prompt=`Create a complete study pack for the anatomy lecture titled "${resource.title}". The material below is derived from the lecture transcript. Stay grounded in it and clearly avoid adding unsupported details. Return VALID JSON only with this shape: {"overview":"","objectives":[""],"notes":[{"heading":"","points":[""]}],"key_structures":[""],"clinical_correlations":[""],"must_remember":[""],"summary":"","questions":[{"type":"mcq","question":"","options":["","","",""],"answer":0,"explanation":""}],"flashcards":[{"front":"","back":""}]}. Make 10 useful MCQs, 12 flashcards, and comprehensive notes.\n\nLECTURE MATERIAL:\n${combined}`;let raw=await ai(prompt),pack=JSON.parse(cleanJson(raw));return pack}
-app.post('/api/youtube/notebook',access,async(req,res)=>{
-  let url=String(req.body.url||'').trim();
-  let id=youtubeId(url);
-  if(!id)return res.status(400).json({error:'Paste a valid public YouTube video link.'});
+const youtubeJobs=new Map();
+
+async function processYoutubeNotebook(jobId,url,userId){
+  const job=youtubeJobs.get(jobId);
+  if(!job)return;
   try{
-    let title='YouTube Lecture · '+id;
+    job.status='working'; job.message='Getting the lecture transcript…';
+    let id=youtubeId(url),title='YouTube Lecture · '+id;
     try{
       let o=await fetch('https://www.youtube.com/oembed?url='+encodeURIComponent(url)+'&format=json');
       if(o.ok){let d=await o.json();if(d.title)title=String(d.title).slice(0,180)}
     }catch{}
     let tr;
-    try{tr=await fetchTranscript(url)}
-    catch(primary){tr=await geminiYouTubeTranscript(url)}
-    let existing=await db.from('resources').select('*').eq('url',url).eq('created_by',req.user.id).maybeSingle();
+    try{tr=await fetchTranscript(url);job.message='Transcript found. Building your study pack…'}
+    catch(primary){job.message='YouTube captions are unavailable. AI is transcribing the lecture now…';tr=await geminiYouTubeTranscript(url)}
+    let existing=await db.from('resources').select('*').eq('url',url).eq('created_by',userId).maybeSingle();
     if(existing.error)throw Error(existing.error.message);
     let resource;
-    if(existing.data){
-      resource=existing.data;
-    }else{
+    if(existing.data)resource=existing.data;
+    else{
       let ins=await db.from('resources').insert({
-        kind:'video',
-        title,
-        subject:'YouTube Notebook',
-        topic:'Imported lectures',
-        description:'AI study notebook created from a public YouTube video.',
-        url,
-        created_by:req.user.id
+        kind:'video',title,subject:'YouTube Notebook',topic:'Imported lectures',
+        description:'AI study notebook created from a public YouTube video.',url,created_by:userId
       }).select('*').single();
       if(ins.error)throw Error(ins.error.message);
       resource=ins.data;
     }
     if(!resource||!resource.id||!resource.kind)throw Error('The YouTube resource could not be created. Please try again.');
     let saved=await db.from('lecture_transcripts').upsert({
-      resource_id:resource.id,
-      source:tr.model?'gemini-youtube-video':'youtube',
-      language:tr.language||'en',
-      transcript:tr.text,
-      updated_at:new Date().toISOString()
+      resource_id:resource.id,source:tr.model?'gemini-youtube-video':'youtube',
+      language:tr.language||'en',transcript:tr.text,updated_at:new Date().toISOString()
     },{onConflict:'resource_id'}).select('*').single();
     if(saved.error)throw Error(saved.error.message);
+    job.transcript=saved.data; job.resource=resource;
+    job.message='Transcript ready. Generating notes, MCQs and flashcards…';
     let pack=await generatePack(resource,tr.text);
     let old=await db.from('ai_study_packs').select('id').eq('resource_id',resource.id).maybeSingle();
     if(old.error)throw Error(old.error.message);
     let pr=old.data
       ? await db.from('ai_study_packs').update({
-          notes:pack,
-          questions:pack.questions||[],
-          flashcards:pack.flashcards||[],
-          model:AI_MODEL,
-          updated_at:new Date().toISOString()
+          notes:pack,questions:pack.questions||[],flashcards:pack.flashcards||[],
+          model:AI_MODEL,updated_at:new Date().toISOString()
         }).eq('resource_id',resource.id).select('*').single()
       : await db.from('ai_study_packs').insert({
-          resource_id:resource.id,
-          notes:pack,
-          questions:pack.questions||[],
-          flashcards:pack.flashcards||[],
-          model:AI_MODEL
+          resource_id:resource.id,notes:pack,questions:pack.questions||[],
+          flashcards:pack.flashcards||[],model:AI_MODEL
         }).select('*').single();
     if(pr.error)throw Error(pr.error.message);
     await db.from('study_activity').insert({
-      user_id:req.user.id,
-      resource_id:resource.id,
-      activity_type:'lecture_open',
+      user_id:userId,resource_id:resource.id,activity_type:'lecture_open',
       metadata:{source:'youtube-notebook',transcription_model:tr.model||'youtube'}
     });
-    res.json({resource,transcript:saved.data,pack:pr.data});
+    job.status='complete';job.message='Notebook ready.';job.pack=pr.data;
   }catch(e){
     console.error('YouTube notebook:',e.message);
-    res.status(400).json({error:e.message})
+    job.status='error';job.message=e.message||'YouTube notebook generation failed.';
   }
+  setTimeout(()=>youtubeJobs.delete(jobId),30*60*1000);
+}
+
+app.post('/api/youtube/notebook',access,async(req,res)=>{
+  let url=String(req.body.url||'').trim();
+  if(!youtubeId(url))return res.status(400).json({error:'Paste a valid public YouTube video link.'});
+  let jobId=crypto.randomUUID();
+  youtubeJobs.set(jobId,{userId:req.user.id,status:'queued',message:'Starting YouTube notebook…',createdAt:Date.now()});
+  processYoutubeNotebook(jobId,url,req.user.id);
+  res.status(202).json({jobId});
+});
+
+app.get('/api/youtube/notebook/:jobId',access,async(req,res)=>{
+  let job=youtubeJobs.get(req.params.jobId);
+  if(!job||job.userId!==req.user.id)return res.status(404).json({error:'Notebook job not found or expired.'});
+  res.json({status:job.status,message:job.message,resource:job.resource||null,transcript:job.transcript||null,pack:job.pack||null});
 });
 
 app.post('/api/resources/:id/ai/generate',access,async(req,res)=>{let rr=await db.from('resources').select('*').eq('id',req.params.id).single();if(rr.error)return res.status(404).json({error:'Lecture not found'});try{let tr=await getTranscriptFor(rr.data),pack=await generatePack(rr.data,tr.transcript);let old=await db.from('ai_study_packs').select('id').eq('resource_id',rr.data.id).maybeSingle();let r=old.data?await db.from('ai_study_packs').update({notes:pack,questions:pack.questions||[],flashcards:pack.flashcards||[],model:AI_MODEL,updated_at:new Date().toISOString()}).eq('resource_id',rr.data.id).select('*').single():await db.from('ai_study_packs').insert({resource_id:rr.data.id,notes:pack,questions:pack.questions||[],flashcards:pack.flashcards||[],model:AI_MODEL}).select('*').single();if(r.error)throw Error(r.error.message);res.json({pack:r.data})}catch(e){res.status(400).json({error:e.message})}});
