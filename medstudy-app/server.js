@@ -143,8 +143,59 @@ async function geminiYouTubeTranscript(url){
   }
   throw Error(last);
 }
-async function ai(prompt){if(!GEMINI_KEY)throw Error('Student AI tutor is not configured yet. Add GEMINI_API_KEY to the Railway service variables.');let models=[AI_MODEL,AI_FALLBACK_MODEL,'gemini-3.5-flash'].filter((x,i,a)=>x&&a.indexOf(x)===i),last='Gemini AI request failed';for(const model of models){for(let attempt=0;attempt<2;attempt++){try{let rr=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(GEMINI_KEY),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{role:'user',parts:[{text:String(prompt)}]}]})});let dd=await rr.json().catch(()=>({}));if(rr.ok){let tt=extractText(dd.candidates?.[0]?.content||dd);if(tt)return tt.trim();last='Gemini returned an empty response';break}last=dd.error?.message||('Gemini '+model+' returned HTTP '+rr.status);console.error('Gemini model '+model+' HTTP '+rr.status+': '+last);if(![429,500,502,503,504].includes(rr.status))break}catch(err){last=err.message;console.error('Gemini model '+model+': '+err.message)}if(attempt===0)await new Promise(resolve=>setTimeout(resolve,1000))}}throw Error('Student AI is temporarily busy. Please try again in a few seconds. '+last)}
-function cleanJson(t){let x=t.trim().replace(/^\`\`\`(?:json)?/i,'').replace(/\`\`\`$/,'').trim();let a=x.indexOf('{'),b=x.lastIndexOf('}');if(a>=0&&b>a)return x.slice(a,b+1);a=x.indexOf('[');b=x.lastIndexOf(']');if(a>=0&&b>a)return x.slice(a,b+1);return x;}
+async function fetchJsonWithTimeout(url,options={},timeoutMs=90000){
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{return await fetch(url,{...options,signal:controller.signal})}
+  catch(e){if(e.name==='AbortError')throw Error('The AI request timed out. Please try again.');throw e}
+  finally{clearTimeout(timer)}
+}
+async function ai(prompt){
+  if(!GEMINI_KEY)throw Error('Student AI tutor is not configured yet. Add GEMINI_API_KEY to the Railway service variables.');
+  let models=[AI_MODEL,AI_FALLBACK_MODEL,'gemini-3.5-flash'].filter((x,i,a)=>x&&a.indexOf(x)===i),last='Gemini AI request failed';
+  for(const model of models){
+    try{
+      let rr=await fetchJsonWithTimeout('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(GEMINI_KEY),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{role:'user',parts:[{text:String(prompt)}]}]})});
+      let dd=await rr.json().catch(()=>({}));
+      if(rr.ok){let tt=extractText(dd.candidates?.[0]?.content||dd);if(tt)return tt.trim();last='Gemini returned an empty response'}
+      else{last=dd.error?.message||('Gemini '+model+' returned HTTP '+rr.status);console.error('Gemini model '+model+' HTTP '+rr.status+': '+last);if(![429,500,502,503,504].includes(rr.status))break}
+    }catch(err){last=err.message;console.error('Gemini model '+model+': '+err.message)}
+  }
+  throw Error('Student AI is temporarily busy. Please try again in a few seconds. '+last)
+}
+const studyPackSchema={type:'object',additionalProperties:false,properties:{overview:{type:'string'},objectives:{type:'array',items:{type:'string'}},notes:{type:'array',items:{type:'object',additionalProperties:false,properties:{heading:{type:'string'},points:{type:'array',items:{type:'string'}}},required:['heading','points']}},key_structures:{type:'array',items:{type:'string'}},clinical_correlations:{type:'array',items:{type:'string'}},must_remember:{type:'array',items:{type:'string'}},summary:{type:'string'},questions:{type:'array',minItems:10,maxItems:10,items:{type:'object',additionalProperties:false,properties:{type:{type:'string'},question:{type:'string'},options:{type:'array',minItems:4,maxItems:4,items:{type:'string'}},answer:{type:'integer',minimum:0,maximum:3},explanation:{type:'string'}},required:['type','question','options','answer','explanation']}},flashcards:{type:'array',minItems:12,maxItems:12,items:{type:'object',additionalProperties:false,properties:{front:{type:'string'},back:{type:'string'}},required:['front','back']}}},required:['overview','objectives','notes','key_structures','clinical_correlations','must_remember','summary','questions','flashcards']};
+async function aiJson(prompt){
+  if(!GEMINI_KEY)throw Error('Student AI tutor is not configured yet. Add GEMINI_API_KEY to the Railway service variables.');
+  let models=[AI_MODEL,AI_FALLBACK_MODEL,'gemini-3.5-flash'].filter((x,i,a)=>x&&a.indexOf(x)===i),last='Gemini JSON generation failed';
+  for(const model of models){
+    try{
+      let rr=await fetchJsonWithTimeout('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(GEMINI_KEY),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{role:'user',parts:[{text:String(prompt)}]}],generationConfig:{responseMimeType:'application/json',responseSchema:studyPackSchema,temperature:0.2}})});
+      let dd=await rr.json().catch(()=>({}));
+      if(rr.ok){let raw=String(extractText(dd.candidates?.[0]?.content||dd)||'').trim();if(raw)return raw;last='Gemini returned an empty JSON response'}
+      else{last=dd.error?.message||('Gemini '+model+' returned HTTP '+rr.status);console.error('Gemini JSON '+model+' HTTP '+rr.status+': '+last);if(![429,500,502,503,504].includes(rr.status))break}
+    }catch(err){last=err.message;console.error('Gemini JSON '+model+': '+err.message)}
+  }
+  throw Error('Study-pack AI is temporarily busy. Please try again later. '+last)
+}
+function cleanJson(t){
+  let x=String(t||'').replace(/^\uFEFF/,'').trim().replace(/^```(?:json)?/i,'').replace(/```$/,'').trim();
+  let start=-1,depth=0,inString=false,escaped=false;
+  for(let i=0;i<x.length;i++){let ch=x[i];if(inString){if(escaped)escaped=false;else if(ch==='\\')escaped=true;else if(ch==='"')inString=false;continue}if(ch==='"'){inString=true;continue}if(ch==='{'||ch==='['){if(start<0)start=i;depth++}else if(ch==='}'||ch===']'){if(start>=0){depth--;if(depth===0)return x.slice(start,i+1)}}}
+  return x
+}
+function parseStudyPack(raw){
+  let text=cleanJson(raw),attempts=[text,text.replace(/,\s*([}\]])/g,'$1'),text.replace(/([,{]\s*)([A-Za-z_$][\w$-]*)\s*:/g,'$1"$2":').replace(/,\s*([}\]])/g,'$1')];
+  for(const candidate of attempts){try{return JSON.parse(candidate)}catch(e){}}
+  throw Error('The AI returned an invalid study-pack format. Please try generating the notebook again.')
+}
+function normalizeStudyPack(pack){
+  if(!pack||typeof pack!=='object')throw Error('The AI returned an empty study pack.');
+  let qs=Array.isArray(pack.questions)?pack.questions:[],fs=Array.isArray(pack.flashcards)?pack.flashcards:[];
+  if(qs.length!==10||fs.length!==12)throw Error('The AI returned an incomplete study pack. Please try generating the notebook again.');
+  pack.questions=qs.map((q,i)=>({type:'mcq',question:String(q.question||('Question '+(i+1))),options:Array.isArray(q.options)?q.options.slice(0,4).map(String):[],answer:Number.isInteger(q.answer)?q.answer:0,explanation:String(q.explanation||'')}));
+  pack.flashcards=fs.map(f=>({front:String(f.front||''),back:String(f.back||'')}));
+  if(pack.questions.some(q=>q.options.length!==4||q.answer<0||q.answer>3))throw Error('The AI returned an invalid MCQ set. Please try generating the notebook again.');
+  return pack
+}
 async function getTranscriptFor(resource,allowManual=true){let c=await db.from('lecture_transcripts').select('*').eq('resource_id',resource.id).maybeSingle();if(c.data)return c.data;if(!allowManual)throw Error('No transcript available for this lecture.');if(resource.kind==='slides'){let f=await db.from('resource_files').select('*').eq('resource_id',resource.id).maybeSingle();if(f.data&&f.data.mime_type==='application/pdf'){let file=await db.storage.from('medstudy-resources').download(f.data.storage_path);if(!file.error){try{const pdfParse=(await import('pdf-parse')).default;let parsed=await pdfParse(file.data);if(parsed.text?.trim()){let r=await db.from('lecture_transcripts').insert({resource_id:resource.id,source:'uploaded-pdf',language:'en',transcript:parsed.text}).select('*').single();if(r.error)throw Error(r.error.message);return r.data}}catch(e){throw Error('The PDF was uploaded, but its text could not be extracted: '+e.message)}}}}let tr;try{tr=await fetchTranscript(resource.url)}catch(primary){tr=await geminiYouTubeTranscript(resource.url)}let r=await db.from('lecture_transcripts').insert({resource_id:resource.id,source:tr.model?'gemini-youtube-video':'youtube',language:tr.language||'en',transcript:tr.text}).select('*').single();if(r.error)throw Error(r.error.message);return r.data}
 function studyMetaFromTitle(title){let t=String(title||'').replace(/\s+/g,' ').trim().replace(/^\s*(ANATOMY|ANATOMICAL|LECTURE|VIDEO)\s*[:\-–]\s*/i,'').replace(/\s+[-–]\s+BY\s+DR\.?\s+MITESH\s+DAVE.*$/i,'').replace(/\s+BY\s+DR\.?\s+MITESH\s+DAVE.*$/i,'').trim();let l=t.toLowerCase(),subject='Medical Studies';if(/embry|fertil|blast|cleavage|implant/.test(l))subject='Embryology';else if(/histolog|cell|tissue/.test(l))subject='Histology';else if(/physiolog/.test(l))subject='Physiology';else if(/biochem/.test(l))subject='Biochemistry';else if(/anatom|osteolog|dissection|viva|larynx|stomach|liver|intestin|spleen|kidney|heart|brain|lung|nerve|muscle|plexus/.test(l))subject='Anatomy';return {subject,topic:(t||'Imported lecture').slice(0,140)}}
 async function generatePack(resource,transcript){let source=String(transcript||'').trim();if(!source)throw Error('The lecture transcript is empty.');let prompt=`Create a complete medical study pack for the lecture titled "${resource.title}". Use ONLY information supported by the transcript below; do not invent facts. Preserve important medical terminology. Return VALID JSON only with this shape: {"overview":"","objectives":[""],"notes":[{"heading":"","points":[""]}],"key_structures":[""],"clinical_correlations":[""],"must_remember":[""],"summary":"","questions":[{"type":"mcq","question":"","options":["","","",""],"answer":0,"explanation":""}],"flashcards":[{"front":"","back":""}]}. Make exactly 10 useful MCQs and exactly 12 flashcards. Make the notes comprehensive but concise. Prioritize high-yield anatomy, relationships, actions, innervation, blood supply, clinical correlations and exam-relevant facts only when the transcript actually covers them.
