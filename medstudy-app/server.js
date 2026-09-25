@@ -57,63 +57,38 @@ async function geminiYouTubeTranscript(url){
   let id=youtubeId(url);
   if(!id)throw Error('Paste a valid public YouTube video link.');
   let youtubeUrl='https://www.youtube.com/watch?v='+encodeURIComponent(id);
-  let prompt='Transcribe this public YouTube lecture as accurately as possible. Produce a readable lecture transcript from the spoken audio, preserving important medical terminology. Do not summarize or invent content. If some words are unclear, mark them as [unclear]. Include useful timestamps when available. Return only the transcript text.';
-  let models=['gemini-3.8-flash','gemini-3.6-flash','gemini-3.5-flash-lite',AI_MODEL,AI_FALLBACK_MODEL].filter((x,i,a)=>x&&a.indexOf(x)===i);
+  let prompt='Create an accurate transcript of the spoken content in this public YouTube lecture. Captions are not required: analyze the video audio directly. Preserve important medical terminology, punctuation and useful timestamps when available. Do not summarize or invent content. If a word is genuinely unclear, write [unclear]. Return only the transcript.';
+  let models=['gemini-3.8-flash','gemini-3.7-flash','gemini-3.6-flash','gemini-3.5-flash-lite','gemini-3.5-flash',AI_MODEL,AI_FALLBACK_MODEL].filter((x,i,a)=>x&&a.indexOf(x)===i);
   let last='Gemini could not process this YouTube video.';
   for(const model of models){
-    try{
-      let rr=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent',{
-        method:'POST',
-        headers:{'Content-Type':'application/json','x-goog-api-key':GEMINI_KEY},
-        body:JSON.stringify({contents:[{parts:[
-          {text:prompt},
-          {file_data:{file_uri:youtubeUrl}}
-        ]}]})
-      });
-      let dd=await rr.json().catch(()=>({}));
-      if(rr.ok){
-        let text=extractText(dd.candidates?.[0]?.content||dd).trim();
-        if(text.length>=50)return {text,model};
-        last='Gemini returned an empty or very short transcript.';
-      }else{
+    for(let attempt=0;attempt<3;attempt++){
+      try{
+        let rr=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent',{
+          method:'POST',
+          headers:{'Content-Type':'application/json','x-goog-api-key':GEMINI_KEY},
+          body:JSON.stringify({contents:[{parts:[{text:prompt},{file_data:{file_uri:youtubeUrl}}]}]})
+        });
+        let dd=await rr.json().catch(()=>({}));
+        if(rr.ok){
+          let text=extractText(dd.candidates?.[0]?.content||dd).trim();
+          if(text.length>=50)return {text,model};
+          last='Gemini returned an empty or very short transcript.';
+          break;
+        }
         last=dd.error?.message||('Gemini returned HTTP '+rr.status);
-        console.error('Gemini YouTube HTTP '+rr.status+' using '+model+': '+last);
+        console.error('Gemini YouTube HTTP '+rr.status+' using '+model+' attempt '+(attempt+1)+': '+last);
+        if(rr.status===400||rr.status===401||rr.status===403||rr.status===404)break;
+        if(rr.status!==429&&rr.status!==500&&rr.status!==502&&rr.status!==503)break;
+        await new Promise(r=>setTimeout(r,1200*(attempt+1)));
+      }catch(e){
+        last=e.message;
+        console.error('Gemini YouTube '+model+' attempt '+(attempt+1)+': '+e.message);
+        await new Promise(r=>setTimeout(r,1200*(attempt+1)));
       }
-    }catch(e){last=e.message;console.error('Gemini YouTube '+model+': '+e.message)}
+    }
   }
   throw Error(last);
 }
-app.post('/api/youtube/notebook',access,async(req,res)=>{
-  let url=String(req.body.url||'').trim();
-  let id=youtubeId(url);
-  if(!id)return res.status(400).json({error:'Paste a valid public YouTube video link.'});
-  try{
-    let title='YouTube Lecture · '+id;
-    try{
-      let o=await fetch('https://www.youtube.com/oembed?url='+encodeURIComponent(url)+'&format=json');
-      if(o.ok){let d=await o.json();if(d.title)title=String(d.title).slice(0,180)}
-    }catch{}
-    let tr=await geminiYouTubeTranscript(url);
-    let existing=await db.from('resources').select('*').eq('url',url).eq('created_by',req.user.id).maybeSingle();
-    let resource;
-    if(existing.data)resource=existing.data;
-    else{
-      let ins=await db.from('resources').insert({kind:'video',title,subject:'YouTube Notebook',topic:'Imported lectures',description:'AI study notebook created from a public YouTube video.',url,created_by:req.user.id}).select('*').single();
-      if(ins.error)throw Error(ins.error.message);
-      resource=ins.data;
-    }
-    let saved=await db.from('lecture_transcripts').upsert({resource_id:resource.id,source:'gemini-youtube-video',language:'en',transcript:tr.text,updated_at:new Date().toISOString()},{onConflict:'resource_id'}).select('*').single();
-    if(saved.error)throw Error(saved.error.message);
-    let pack=await generatePack(resource,tr.text);
-    let old=await db.from('ai_study_packs').select('id').eq('resource_id',resource.id).maybeSingle();
-    let pr=old.data?await db.from('ai_study_packs').update({notes:pack,questions:pack.questions||[],flashcards:pack.flashcards||[],model:AI_MODEL,updated_at:new Date().toISOString()}).eq('resource_id',resource.id).select('*').single():await db.from('ai_study_packs').insert({resource_id:resource.id,notes:pack,questions:pack.questions||[],flashcards:pack.flashcards||[],model:AI_MODEL}).select('*').single();
-    if(pr.error)throw Error(pr.error.message);
-    await db.from('study_activity').insert({user_id:req.user.id,resource_id:resource.id,activity_type:'lecture_open',metadata:{source:'youtube-notebook',transcription_model:tr.model}});
-    res.json({resource,transcript:saved.data,pack:pr.data});
-  }catch(e){console.error('YouTube notebook:',e.message);res.status(400).json({error:e.message})}
-});
-
-function extractText(data){if(typeof data==='string')return data;let out=[];function walk(x){if(!x)return;if(typeof x==='string')out.push(x);else if(Array.isArray(x))x.forEach(walk);else if(typeof x==='object'){if(typeof x.text==='string')out.push(x.text);else Object.values(x).forEach(walk)}}walk(data);return out.join('\n').trim()}
 async function ai(prompt){if(!GEMINI_KEY)throw Error('Student AI tutor is not configured yet. Add GEMINI_API_KEY to the Railway service variables.');let models=[AI_MODEL,AI_FALLBACK_MODEL,'gemini-3.5-flash'].filter((x,i,a)=>x&&a.indexOf(x)===i),last='Gemini AI request failed';for(const model of models){for(let attempt=0;attempt<2;attempt++){try{let rr=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent?key='+encodeURIComponent(GEMINI_KEY),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{role:'user',parts:[{text:String(prompt)}]}]})});let dd=await rr.json().catch(()=>({}));if(rr.ok){let tt=extractText(dd.candidates?.[0]?.content||dd);if(tt)return tt.trim();last='Gemini returned an empty response';break}last=dd.error?.message||('Gemini '+model+' returned HTTP '+rr.status);console.error('Gemini model '+model+' HTTP '+rr.status+': '+last);if(![429,500,502,503,504].includes(rr.status))break}catch(err){last=err.message;console.error('Gemini model '+model+': '+err.message)}if(attempt===0)await new Promise(resolve=>setTimeout(resolve,1000))}}throw Error('Student AI is temporarily busy. Please try again in a few seconds. '+last)}
 function cleanJson(t){let x=t.trim().replace(/^\`\`\`(?:json)?/i,'').replace(/\`\`\`$/,'').trim();let a=x.indexOf('{'),b=x.lastIndexOf('}');if(a>=0&&b>a)return x.slice(a,b+1);a=x.indexOf('[');b=x.lastIndexOf(']');if(a>=0&&b>a)return x.slice(a,b+1);return x;}
 async function getTranscriptFor(resource,allowManual=true){let c=await db.from('lecture_transcripts').select('*').eq('resource_id',resource.id).maybeSingle();if(c.data)return c.data;if(!allowManual)throw Error('No transcript available for this lecture.');if(resource.kind==='slides'){let f=await db.from('resource_files').select('*').eq('resource_id',resource.id).maybeSingle();if(f.data&&f.data.mime_type==='application/pdf'){let file=await db.storage.from('medstudy-resources').download(f.data.storage_path);if(!file.error){try{const pdfParse=(await import('pdf-parse')).default;let parsed=await pdfParse(file.data);if(parsed.text?.trim()){let r=await db.from('lecture_transcripts').insert({resource_id:resource.id,source:'uploaded-pdf',language:'en',transcript:parsed.text}).select('*').single();if(r.error)throw Error(r.error.message);return r.data}}catch(e){throw Error('The PDF was uploaded, but its text could not be extracted: '+e.message)}}}}let tr=await fetchTranscript(resource.url);let r=await db.from('lecture_transcripts').insert({resource_id:resource.id,source:'youtube',language:tr.language,transcript:tr.text}).select('*').single();if(r.error)throw Error(r.error.message);return r.data}
