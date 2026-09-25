@@ -61,15 +61,51 @@ async function ensureImportTopic(subjectName,topicName){let s=await db.from('sub
 async function importZipFile(req,res){if(!req.file)return res.status(400).json({error:'ZIP file is required'});let archive;try{archive=await unzipper.Open.buffer(req.file.buffer)}catch(e){return res.status(400).json({error:'The uploaded ZIP could not be opened: '+e.message})}let imported=0,skipped=0,errors=[];for(const entry of archive.files){let path=String(entry.path||'').replace(/^\\/,'');if(entry.type!=='File'||!path||path.startsWith('__MACOSX/')||path.includes('/.')){skipped++;continue}let ext=path.toLowerCase().split('.').pop();let mimeMap={pdf:'application/pdf',ppt:'application/vnd.ms-powerpoint',pptx:'application/vnd.openxmlformats-officedocument.presentationml.presentation',odp:'application/vnd.oasis.opendocument.presentation'};if(!mimeMap[ext]){skipped++;continue}if(entry.uncompressedSize>100*1024*1024){errors.push(path+': file exceeds 100 MB');continue}let parts=path.split('/').filter(Boolean);let subject=importSubjectName(parts[0],path);if(!subject){skipped++;continue}let topic=parts.length>2?parts[1]:'General';let title=parts[parts.length-1].replace(/\\.[^.]+$/,'');try{let loc=await ensureImportTopic(subject,topic);let exists=await db.from('resources').select('id').eq('title',title).eq('subject',subject).eq('topic',loc.name).maybeSingle();if(exists.error)throw Error(exists.error.message);if(exists.data){skipped++;continue}let buf=await entry.buffer();let resource=await db.from('resources').insert({kind:'slides',title,subject,topic:loc.name,subject_id:loc.sid,topic_id:loc.tid,description:'Imported from '+req.file.originalname,created_by:req.user.id}).select('*').single();if(resource.error)throw Error(resource.error.message);let pathKey='resources/'+resource.data.id+'/'+crypto.randomUUID()+'-'+safeName(parts[parts.length-1]);let up=await db.storage.from('medstudy-resources').upload(pathKey,buf,{contentType:mimeMap[ext],upsert:false});if(up.error){await db.from('resources').delete().eq('id',resource.data.id);throw Error(up.error.message)}let rf=await db.from('resource_files').insert({resource_id:resource.data.id,subject_id:loc.sid,topic_id:loc.tid,title,storage_path:pathKey,mime_type:mimeMap[ext],size_bytes:buf.length,created_by:req.user.id}).select('*').single();if(rf.error){await db.storage.from('medstudy-resources').remove([pathKey]);await db.from('resources').delete().eq('id',resource.data.id);throw Error(rf.error.message)}if(ext==='pdf'){try{let parsed=await (await import('pdf-parse')).default(buf);if(parsed.text?.trim())await db.from('lecture_transcripts').insert({resource_id:resource.data.id,source:'imported-pdf',language:'en',transcript:parsed.text.trim()})}catch(e){errors.push(title+': PDF stored but text extraction failed')}}imported++}catch(e){errors.push(path+': '+e.message)}}res.json({ok:true,source:req.file.originalname,imported,skipped,errors})}
 app.post('/api/admin/import-zip',admin,zipUpload.single('zip'),importZipFile);
 app.get('/api/resources/:id/file-url',access,async(req,res)=>{let f=await db.from('resource_files').select('*').eq('resource_id',req.params.id).maybeSingle();if(f.error||!f.data)return res.status(404).json({error:'File not found'});let u=await db.storage.from('medstudy-resources').createSignedUrl(f.data.storage_path,3600);if(u.error)return res.status(500).json({error:u.error.message});res.json({url:u.data.signedUrl,file:f.data})});
-function youtubeId(url){try{let u=new URL(url);if(u.hostname==='youtu.be')return u.pathname.slice(1);if(u.hostname.includes('youtube.com')){if(u.pathname.startsWith('/embed/'))return u.pathname.split('/')[2];if(u.pathname.startsWith('/shorts/'))return u.pathname.split('/')[2];return u.searchParams.get('v')}}catch{}return null}
-async function fetchTranscript(url){let id=youtubeId(url);if(!id)throw Error('This lecture does not have a supported YouTube video URL.');try{const mod=await import('youtube-transcript-plus');const result=await mod.fetchTranscript(id);let text=result.map(x=>x.text).join(' ').replace(/\s+/g,' ').trim();if(!text)throw Error('No transcript was returned.');return {text,language:'en'};}catch(e){throw Error('Could not fetch a YouTube transcript. The video may have captions disabled, or YouTube may be blocking transcript requests from the server. You can add a transcript manually from the developer dashboard.');}}
+function youtubeId(url){try{let u=new URL(url);if(u.hostname==='youtu.be')return u.pathname.slice(1).split('/')[0];if(u.hostname.includes('youtube.com')){if(u.pathname.startsWith('/embed/'))return u.pathname.split('/')[2];if(u.pathname.startsWith('/shorts/'))return u.pathname.split('/')[2];return u.searchParams.get('v')}}catch{}return null}
+function extractText(node){
+  if(!node)return '';
+  if(typeof node==='string')return node;
+  if(Array.isArray(node))return node.map(extractText).filter(Boolean).join('\n');
+  if(typeof node==='object'){
+    if(typeof node.text==='string')return node.text;
+    if(typeof node.output_text==='string')return node.output_text;
+    for(const k of ['content','parts','output','steps','candidates']){
+      if(node[k]){const t=extractText(node[k]);if(t)return t}
+    }
+  }
+  return '';
+}
+async function fetchTranscript(url){
+  let id=youtubeId(url);
+  if(!id)throw Error('This lecture does not have a supported YouTube video URL.');
+  try{
+    const mod=await import('youtube-transcript-plus');
+    let last;
+    for(let attempt=0;attempt<3;attempt++){
+      try{
+        const result=await mod.fetchTranscript(id,{
+          retries:1,
+          retryDelay:800,
+          userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36'
+        });
+        let text=result.map(x=>x.text).join(' ').replace(/\s+/g,' ').trim();
+        if(text.length>=50)return {text,language:result[0]?.lang||'en'};
+        last=Error('No transcript was returned.');
+      }catch(e){last=e}
+      await new Promise(r=>setTimeout(r,1000*(attempt+1)));
+    }
+    throw last||Error('No transcript was returned.');
+  }catch(e){
+    throw Error('Could not fetch a YouTube transcript. The video may have captions disabled, or YouTube may be blocking transcript requests from the server.');
+  }
+}
 async function geminiYouTubeTranscript(url){
   if(!GEMINI_KEY)throw Error('AI is not configured. Add GEMINI_API_KEY to the Railway service variables.');
   let id=youtubeId(url);
   if(!id)throw Error('Paste a valid public YouTube video link.');
   let youtubeUrl='https://www.youtube.com/watch?v='+encodeURIComponent(id);
   let prompt='Create an accurate transcript of the spoken content in this public YouTube lecture. Preserve important medical terminology, punctuation and useful timestamps when available. Do not summarize or invent content. If a word is genuinely unclear, write [unclear]. Return only the transcript.';
-  let models=['gemini-3.8-flash','gemini-3.7-flash','gemini-3.6-flash','gemini-3.5-flash-lite','gemini-3.5-flash',AI_MODEL,AI_FALLBACK_MODEL].filter((x,i,a)=>x&&a.indexOf(x)===i);
+  let models=[AI_MODEL,AI_FALLBACK_MODEL,'gemini-3.6-flash','gemini-3.5-flash'].filter((x,i,a)=>x&&a.indexOf(x)===i);
   let last='Gemini could not process this YouTube video.';
   for(const model of models){
     for(let attempt=0;attempt<2;attempt++){
@@ -87,7 +123,7 @@ async function geminiYouTubeTranscript(url){
         });
         let dd=await rr.json().catch(()=>({}));
         if(rr.ok){
-          let text=String(dd.output_text||extractText(dd.candidates?.[0]?.content||dd)).trim();
+          let text=String(dd.output_text||extractText(dd.steps)||extractText(dd)).trim();
           if(text.length>=50)return {text,model};
           last='Gemini returned an empty or very short transcript.';
           break;
