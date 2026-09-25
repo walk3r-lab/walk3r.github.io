@@ -3,3 +3,5 @@ AI notes, quizzes, flashcards, lecture tutor, streaks, progress and timed break 
 Deployment marker: 2026-09-24
 Content management + secure resource uploads enabled 2026-09-24
 Adaptive learner AI + in-site YouTube search 2026-09-24
+
+YouTube reliability release: ff1ff957bb4c0d71194dd4b248f1a5b0d38f9055
