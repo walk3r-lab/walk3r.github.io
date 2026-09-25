@@ -68,20 +68,26 @@ async function geminiYouTubeTranscript(url){
   let id=youtubeId(url);
   if(!id)throw Error('Paste a valid public YouTube video link.');
   let youtubeUrl='https://www.youtube.com/watch?v='+encodeURIComponent(id);
-  let prompt='Create an accurate transcript of the spoken content in this public YouTube lecture. Captions are not required: analyze the video audio directly. Preserve important medical terminology, punctuation and useful timestamps when available. Do not summarize or invent content. If a word is genuinely unclear, write [unclear]. Return only the transcript.';
+  let prompt='Create an accurate transcript of the spoken content in this public YouTube lecture. Preserve important medical terminology, punctuation and useful timestamps when available. Do not summarize or invent content. If a word is genuinely unclear, write [unclear]. Return only the transcript.';
   let models=['gemini-3.8-flash','gemini-3.7-flash','gemini-3.6-flash','gemini-3.5-flash-lite','gemini-3.5-flash',AI_MODEL,AI_FALLBACK_MODEL].filter((x,i,a)=>x&&a.indexOf(x)===i);
   let last='Gemini could not process this YouTube video.';
   for(const model of models){
-    for(let attempt=0;attempt<3;attempt++){
+    for(let attempt=0;attempt<2;attempt++){
       try{
-        let rr=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent',{
+        let rr=await fetch('https://generativelanguage.googleapis.com/v1beta/interactions',{
           method:'POST',
           headers:{'Content-Type':'application/json','x-goog-api-key':GEMINI_KEY},
-          body:JSON.stringify({contents:[{parts:[{text:prompt},{file_data:{file_uri:youtubeUrl}}]}]})
+          body:JSON.stringify({
+            model,
+            input:[
+              {type:'video',uri:youtubeUrl},
+              {type:'text',text:prompt}
+            ]
+          })
         });
         let dd=await rr.json().catch(()=>({}));
         if(rr.ok){
-          let text=extractText(dd.candidates?.[0]?.content||dd).trim();
+          let text=String(dd.output_text||extractText(dd.candidates?.[0]?.content||dd)).trim();
           if(text.length>=50)return {text,model};
           last='Gemini returned an empty or very short transcript.';
           break;
@@ -89,12 +95,12 @@ async function geminiYouTubeTranscript(url){
         last=dd.error?.message||('Gemini returned HTTP '+rr.status);
         console.error('Gemini YouTube HTTP '+rr.status+' using '+model+' attempt '+(attempt+1)+': '+last);
         if(rr.status===400||rr.status===401||rr.status===403||rr.status===404)break;
-        if(rr.status!==429&&rr.status!==500&&rr.status!==502&&rr.status!==503)break;
-        await new Promise(r=>setTimeout(r,1200*(attempt+1)));
+        if(rr.status!==429&&rr.status!==500&&rr.status!==502&&rr.status!==503&&rr.status!==504)break;
+        await new Promise(r=>setTimeout(r,1500*(attempt+1)));
       }catch(e){
         last=e.message;
         console.error('Gemini YouTube '+model+' attempt '+(attempt+1)+': '+e.message);
-        await new Promise(r=>setTimeout(r,1200*(attempt+1)));
+        await new Promise(r=>setTimeout(r,1500*(attempt+1)));
       }
     }
   }
