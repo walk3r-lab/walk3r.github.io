@@ -304,7 +304,7 @@ async function processYoutubeNotebook(jobId,url,userId){
     try{let o=await fetchJsonWithTimeout('https://www.youtube.com/oembed?url='+encodeURIComponent(url)+'&format=json',{method:'GET'},20000);if(o.ok){let d=await o.json();if(d.title){title=String(d.title).slice(0,180);meta=studyMetaFromTitle(title)}}}catch{}
     let tr;
     try{tr=await fetchTranscript(url);job.message='Transcript found. Building your study pack…'}
-    catch(primary){job.message='YouTube captions are unavailable. AI is transcribing the lecture now…';tr=await geminiYouTubeTranscript(url,req.user.id)}
+    catch(primary){job.message='YouTube captions are unavailable. AI is transcribing the lecture now…';tr=await geminiYouTubeTranscript(url,userId)}
     let existing=await db.from('resources').select('*').eq('url',url).eq('created_by',userId).maybeSingle();if(existing.error)throw Error(existing.error.message);
     let resource;
     if(existing.data){resource=existing.data;let meta2=studyMetaFromTitle(resource.title||title);let upd=await db.from('resources').update({subject:meta2.subject,topic:meta2.topic}).eq('id',resource.id).select('*').single();if(!upd.error)resource=upd.data}
