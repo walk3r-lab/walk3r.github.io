@@ -2,7 +2,7 @@ require('dotenv').config();
 const express=require('express'),cookieParser=require('cookie-parser'),jwt=require('jsonwebtoken'),bcrypt=require('bcryptjs'),path=require('path');
 const {createClient}=require('@supabase/supabase-js');
 const crypto=require('crypto');
-const multer=require('multer');
+const multer=require('multer'),unzipper=require('unzipper');
 const app=express();
 app.set('trust proxy',1);
 app.use(express.json({limit:'60mb'})); app.use(cookieParser()); app.use(express.static('public'));
