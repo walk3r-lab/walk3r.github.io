@@ -33,7 +33,7 @@ async function withAiSlot(task){
 function pumpAiQueue(){while(aiRunning<AI_MAX_CONCURRENCY&&aiWaiters.length)aiWaiters.shift()()}
 
 const db=createClient(process.env.SUPABASE_URL,process.env.SUPABASE_SERVICE_ROLE_KEY,{auth:{autoRefreshToken:false,persistSession:false}});
-const SECRET=process.env.JWT_SECRET, PRICE=Number(process.env.SUBSCRIPTION_PRICE||800), PAYNO=process.env.PAYMENT_NUMBER||'0736501740';
+const SECRET=process.env.JWT_SECRET, PRICE=800, PAYNO=process.env.PAYMENT_NUMBER||'0736501740';
 const OPENAI_KEY=process.env.OPENAI_API_KEY||'', GEMINI_KEY=process.env.GEMINI_API_KEY||'', AI_MODEL=process.env.GEMINI_MODEL||'gemini-3.5-flash-lite', AI_FALLBACK_MODEL=process.env.GEMINI_FALLBACK_MODEL||'gemini-3.6-flash', YT_KEY=process.env.YOUTUBE_API_KEY||'';
 const WHATSAPP_TOKEN=process.env.WHATSAPP_ACCESS_TOKEN||'', WHATSAPP_PHONE_ID=process.env.WHATSAPP_PHONE_NUMBER_ID||'', WHATSAPP_TO=String(process.env.WHATSAPP_ADMIN_TO||'').replace(/\s+/g,'').replace(/^\+254/,'254').replace(/^0/,'254'), WHATSAPP_API_VERSION=process.env.WHATSAPP_API_VERSION||'v25.0', WHATSAPP_TEMPLATE=process.env.WHATSAPP_TEMPLATE_NAME||'medstudy_subscription_pending', WHATSAPP_TEMPLATE_LANG=process.env.WHATSAPP_TEMPLATE_LANG||'en_US';
 const TELEGRAM_TOKEN=process.env.TELEGRAM_BOT_TOKEN||'', TELEGRAM_CHAT_ID=String(process.env.TELEGRAM_CHAT_ID||'').trim();
